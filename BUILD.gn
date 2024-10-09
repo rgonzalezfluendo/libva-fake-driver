@@ -1,0 +1,71 @@
+# Copyright 2022 The Chromium Authors
+# Copyright 2024 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+group("all") {
+  deps = [ ":fake_drv_video" ]
+}
+
+pkg_config("libdrm") {
+  pkg_deps = [ "libdrm" ]
+}
+
+pkg_config("libgbm") {
+  pkg_deps = [ "gbm" ]
+}
+
+pkg_config("libva") {
+  pkg_deps = [ "libva" ]
+}
+
+pkg_config("libyuv") {
+  pkg_deps = [ "libyuv" ]
+}
+
+shared_library("fake_drv_video") {
+  sources = [ "src/fake_drv_video.cc" ]
+
+  deps = [
+    ":fake_libva_driver_internals",
+  ]
+}
+
+source_set("fake_libva_driver_internals") {
+  visibility = [ ":fake_drv_video" ]
+  sources = [
+    "src/base/logging.h",
+    "src/base/ptr_util.h",
+    "src/base/scoped_fd.cc",
+    "src/base/scoped_fd.h",
+    "src/context_delegate.h",
+    "src/fake_buffer.cc",
+    "src/fake_buffer.h",
+    "src/fake_config.cc",
+    "src/fake_config.h",
+    "src/fake_context.cc",
+    "src/fake_context.h",
+    "src/fake_driver.cc",
+    "src/fake_driver.h",
+    "src/fake_image.cc",
+    "src/fake_image.h",
+    "src/fake_surface.cc",
+    "src/fake_surface.h",
+    "src/no_op_context_delegate.cc",
+    "src/no_op_context_delegate.h",
+    "src/object_tracker.h",
+    "src/scoped_bo_mapping_factory.cc",
+    "src/scoped_bo_mapping_factory.h",
+  ]
+
+  public_configs = [
+    ":libgbm",
+    ":libva",
+  ]
+
+  configs += [
+    ":libdrm",
+    ":libyuv",
+  ]
+
+}

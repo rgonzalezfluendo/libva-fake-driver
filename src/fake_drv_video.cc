@@ -1,18 +1,34 @@
-// Copyright 2020 The Chromium OS Authors. All rights reserved.
+// Copyright 2020 The ChromiumOS Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <stdbool.h>
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/40285824): Remove this and convert code to safer constructs.
+#pragma allow_unsafe_buffers
+#endif
 
+#include <stdbool.h>
 #include <va/va.h>
 #include <va/va_backend.h>
+#include <va/va_drmcommon.h>
+
+#include <set>
+
+#include "base/logging.h"
+#include "fake_driver.h"
+#include "libyuv.h"
 
 VAStatus FakeTerminate(VADriverContextP ctx) {
+  delete static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
   return VA_STATUS_SUCCESS;
 }
 
 // Needed to be able to instantiate kCapabilities statically.
 #define MAX_CAPABILITY_ATTRIBUTES 5
+
+const VAImageFormat kSupportedImageFormats[] = {{.fourcc = VA_FOURCC_NV12,
+                                                 .byte_order = VA_LSB_FIRST,
+                                                 .bits_per_pixel = 12}};
 
 struct Capability {
   VAProfile profile;
@@ -21,6 +37,12 @@ struct Capability {
   VAConfigAttrib attrib_list[MAX_CAPABILITY_ATTRIBUTES];
 };
 const struct Capability kCapabilities[] = {
+    {VAProfileAV1Profile0,
+     VAEntrypointVLD,
+     1,
+     {
+         {VAConfigAttribRTFormat, VA_RT_FORMAT_YUV420},
+     }},
     {VAProfileVP8Version0_3,
      VAEntrypointVLD,
      1,
@@ -148,16 +170,16 @@ VAStatus FakeQueryConfigProfiles(VADriverContextP ctx,
                                  VAProfile* profile_list,
                                  int* num_profiles) {
   int i = 0;
-  // TODO(crbug.com/1080871): consider extracting the profiles from
-  // kCapabilities; would need to remove duplicates.
-  profile_list[i++] = VAProfileJPEGBaseline;
-  profile_list[i++] = VAProfileH264ConstrainedBaseline;
-  profile_list[i++] = VAProfileH264Main;
-  profile_list[i++] = VAProfileH264High;
-  profile_list[i++] = VAProfileNone;  // For video processing (e.g. cropping).
-  profile_list[i++] = VAProfileVP8Version0_3;
-  profile_list[i++] = VAProfileVP9Profile0;
-  profile_list[i++] = VAProfileVP9Profile2;
+
+  std::set<VAProfile> unique_profiles;
+  for (auto& capability : kCapabilities)
+    unique_profiles.insert(capability.profile);
+
+  for (auto profile : unique_profiles) {
+    profile_list[i] = profile;
+    i++;
+  }
+
   *num_profiles = i;
 
   return VA_STATUS_SUCCESS;
@@ -175,9 +197,9 @@ VAStatus FakeQueryConfigEntrypoints(VADriverContextP ctx,
                                     VAEntrypoint* entrypoint_list,
                                     int* num_entrypoints) {
   *num_entrypoints = 0;
-  for (size_t i = 0; i < kCapabilitiesSize; ++i) {
-    if (kCapabilities[i].profile == profile)
-      entrypoint_list[(*num_entrypoints)++] = kCapabilities[i].entry_point;
+  for (const auto& capability : kCapabilities) {
+    if (capability.profile == profile)
+      entrypoint_list[(*num_entrypoints)++] = capability.entry_point;
   }
   return VA_STATUS_SUCCESS;
 }
@@ -196,25 +218,26 @@ VAStatus FakeGetConfigAttributes(VADriverContextP ctx,
                                  VAEntrypoint entrypoint,
                                  VAConfigAttrib* attrib_list,
                                  int num_attribs) {
-
   // First, try to find the |profile| and |entrypoint| entry in kCapabilities.
   // If found, search for each entry in the input |attrib_list| (usually many)
   // in kCapabilities[i]'s |attrib_list| (usually few), and, if found, update
   // its |value|.
   bool profile_found = false;
-  for (size_t i = 0; i < kCapabilitiesSize; ++i) {
-    profile_found = kCapabilities[i].profile == profile;
-    if (!(profile_found && kCapabilities[i].entry_point == entrypoint))
+  for (const auto& capability : kCapabilities) {
+    profile_found = capability.profile == profile || profile_found;
+    if (!(capability.profile == profile &&
+          capability.entry_point == entrypoint)) {
       continue;
+    }
 
     // Clear the |attrib_list|: sometimes it's not initialized.
-    for (size_t attrib = 0; attrib < num_attribs; attrib++)
+    for (int attrib = 0; attrib < num_attribs; attrib++)
       attrib_list[attrib].value = VA_ATTRIB_NOT_SUPPORTED;
 
-    for (size_t j = 0; j < kCapabilities[i].num_attribs; j++) {
-      for (size_t n = 0; n < num_attribs; n++) {
-        if (kCapabilities[i].attrib_list[j].type == attrib_list[n].type) {
-          attrib_list[n].value = kCapabilities[i].attrib_list[j].value;
+    for (int j = 0; j < capability.num_attribs; j++) {
+      for (int n = 0; n < num_attribs; n++) {
+        if (capability.attrib_list[j].type == attrib_list[n].type) {
+          attrib_list[n].value = capability.attrib_list[j].value;
           break;
         }
       }
@@ -231,24 +254,65 @@ VAStatus FakeCreateConfig(VADriverContextP ctx,
                           VAConfigAttrib* attrib_list,
                           int num_attribs,
                           VAConfigID* config_id) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
   *config_id = VA_INVALID_ID;
+  bool profile_found = false;
   for (size_t i = 0; i < kCapabilitiesSize; ++i) {
+    profile_found = kCapabilities[i].profile == profile || profile_found;
     if (!(kCapabilities[i].profile == profile &&
           kCapabilities[i].entry_point == entrypoint)) {
       continue;
     }
-    // TODO(crbug.com/1080871): make sure that all entries in |attrib_list| are
-    // also supported by kCapabilities[i].attrib_list.
 
-    // |config_id| is also the index in kCapabilities, to simplify things.
-    *config_id = i;
+    std::vector<VAConfigAttrib> attribs;
+
+    // Checks that the attrib_list is supported by the profile. Assumes the
+    // attributes can be in any order.
+    for (int k = 0; k < num_attribs; k++) {
+      bool attrib_supported = false;
+      for (int j = 0; j < kCapabilities[i].num_attribs; j++) {
+        if (kCapabilities[i].attrib_list[j].type != attrib_list[k].type)
+          continue;
+        // Note that it's not enough to AND the value in |kCapabilities| against
+        // the value provided by the application. We also need to allow for
+        // equality. The reason is that there are some attributes that allow a
+        // value of 0 (e.g., VA_ENC_PACKED_HEADER_NONE for
+        // VAConfigAttribEncPackedHeaders).
+        attrib_supported =
+            (kCapabilities[i].attrib_list[j].value & attrib_list[k].value) ||
+            (kCapabilities[i].attrib_list[j].value == attrib_list[k].value);
+        // TODO(b/258275488): Handle duplicate attributes in attrib_list.
+        if (attrib_supported) {
+          attribs.push_back(attrib_list[k]);
+          break;
+        }
+      }
+      if (!attrib_supported) {
+        return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+      }
+    }
+
+    for (const auto& capability_attrib : kCapabilities[i].attrib_list) {
+      if (std::find_if(attribs.begin(), attribs.end(),
+                       [&capability_attrib](const VAConfigAttrib& attrib) {
+                         return attrib.type == capability_attrib.type;
+                       }) == attribs.end()) {
+        // TODO(b/258275488): Handle default values correctly. Currently,
+        // capability_attrib only contains possible values for a given
+        // attribute, not the default value.
+        attribs.push_back(capability_attrib);
+      }
+    }
+
+    *config_id = fdrv->CreateConfig(profile, entrypoint, std::move(attribs));
+
     return VA_STATUS_SUCCESS;
   }
 
-  // TODO(crbug.com/1080871): return here VA_STATUS_ERROR_UNSUPPORTED_PROFILE /
-  // VA_STATUS_ERROR_ATTR_NOT_SUPPORTED / VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT
-  // depending on what has happened in the previous for loop.
-  return VA_STATUS_ERROR_ALLOCATION_FAILED;
+  return profile_found ? VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT
+                       : VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
 }
 
 /**
@@ -268,21 +332,30 @@ VAStatus FakeQueryConfigAttributes(VADriverContextP ctx,
                                    VAEntrypoint* entrypoint,
                                    VAConfigAttrib* attrib_list,
                                    int* num_attribs) {
-  // |config_id| is also the index in kCapabilities, to simplify things.
-  if (config_id >= kCapabilitiesSize)
-    return VA_STATUS_ERROR_INVALID_CONFIG;
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
 
-  *profile = kCapabilities[config_id].profile;
-  *entrypoint = kCapabilities[config_id].entry_point;
-  *num_attribs = kCapabilities[config_id].num_attribs;
-  for (size_t j = 0; j < kCapabilities[config_id].num_attribs; j++) {
-    attrib_list[j].type = kCapabilities[config_id].attrib_list[j].type;
-    attrib_list[j].value = kCapabilities[config_id].attrib_list[j].value;
-  }
+  const libvafake::FakeConfig& fconfig = fdrv->GetConfig(config_id);
+
+  *profile = fconfig.GetProfile();
+  *entrypoint = fconfig.GetEntrypoint();
+  // TODO(b/358445928): bring back safe math.
+  const size_t fconfig_attribs_size_in_bytes =
+      sizeof(VAConfigAttrib) *
+      static_cast<size_t>(fconfig.GetConfigAttribs().size());
+  memcpy(attrib_list, fconfig.GetConfigAttribs().data(),
+         fconfig_attribs_size_in_bytes);
+  *num_attribs = static_cast<int>(fconfig.GetConfigAttribs().size());
+
   return VA_STATUS_SUCCESS;
 }
 
 VAStatus FakeDestroyConfig(VADriverContextP ctx, VAConfigID config_id) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  fdrv->DestroyConfig(config_id);
+
   return VA_STATUS_SUCCESS;
 }
 
@@ -292,8 +365,7 @@ VAStatus FakeCreateSurfaces(VADriverContextP ctx,
                             int format,
                             int num_surfaces,
                             VASurfaceID* surfaces) {
-  for (size_t index = 0; index < num_surfaces; ++index)
-    surfaces[index] = index;
+  CHECK(false);
 
   return VA_STATUS_SUCCESS;
 }
@@ -301,6 +373,13 @@ VAStatus FakeCreateSurfaces(VADriverContextP ctx,
 VAStatus FakeDestroySurfaces(VADriverContextP ctx,
                              VASurfaceID* surface_list,
                              int num_surfaces) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  for (int i = 0; i < num_surfaces; i++) {
+    fdrv->DestroySurface(surface_list[i]);
+  }
+
   return VA_STATUS_SUCCESS;
 }
 
@@ -312,10 +391,30 @@ VAStatus FakeCreateContext(VADriverContextP ctx,
                            VASurfaceID* render_targets,
                            int num_render_targets,
                            VAContextID* context) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  CHECK(fdrv->ConfigExists(config_id));
+
+  for (int i = 0; i < num_render_targets; i++) {
+    CHECK(fdrv->SurfaceExists(render_targets[i]));
+  }
+
+  *context = fdrv->CreateContext(
+      config_id, picture_width, picture_height, flag,
+      std::vector<VASurfaceID>(
+          render_targets,
+          render_targets + static_cast<size_t>(num_render_targets)));
+
   return VA_STATUS_SUCCESS;
 }
 
 VAStatus FakeDestroyContext(VADriverContextP ctx, VAContextID context) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  fdrv->DestroyContext(context);
+
   return VA_STATUS_SUCCESS;
 }
 
@@ -326,6 +425,14 @@ VAStatus FakeCreateBuffer(VADriverContextP ctx,
                           unsigned int num_elements,
                           void* data,
                           VABufferID* buf_id) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  CHECK(fdrv->ContextExists(context));
+
+  *buf_id = fdrv->CreateBuffer(context, type, /*size_per_element=*/size,
+                               num_elements, data);
+
   return VA_STATUS_SUCCESS;
 }
 
@@ -336,6 +443,9 @@ VAStatus FakeBufferSetNumElements(VADriverContextP ctx,
 }
 
 VAStatus FakeMapBuffer(VADriverContextP ctx, VABufferID buf_id, void** pbuf) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+  *pbuf = fdrv->GetBuffer(buf_id).GetData();
   return VA_STATUS_SUCCESS;
 }
 
@@ -344,12 +454,25 @@ VAStatus FakeUnmapBuffer(VADriverContextP ctx, VABufferID buf_id) {
 }
 
 VAStatus FakeDestroyBuffer(VADriverContextP ctx, VABufferID buffer_id) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  fdrv->DestroyBuffer(buffer_id);
+
   return VA_STATUS_SUCCESS;
 }
 
 VAStatus FakeBeginPicture(VADriverContextP ctx,
                           VAContextID context,
                           VASurfaceID render_target) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  CHECK(fdrv->SurfaceExists(render_target));
+  CHECK(fdrv->ContextExists(context));
+
+  fdrv->GetContext(context).BeginPicture(fdrv->GetSurface(render_target));
+
   return VA_STATUS_SUCCESS;
 }
 
@@ -357,20 +480,47 @@ VAStatus FakeRenderPicture(VADriverContextP ctx,
                            VAContextID context,
                            VABufferID* buffers,
                            int num_buffers) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  CHECK(fdrv->ContextExists(context));
+
+  std::vector<const libvafake::FakeBuffer*> buffer_list;
+  for (int i = 0; i < num_buffers; i++) {
+    CHECK(fdrv->BufferExists(buffers[i]));
+    buffer_list.push_back(&(fdrv->GetBuffer(buffers[i])));
+  }
+
+  fdrv->GetContext(context).RenderPicture(buffer_list);
+
   return VA_STATUS_SUCCESS;
 }
 
 VAStatus FakeEndPicture(VADriverContextP ctx, VAContextID context) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  CHECK(fdrv->ContextExists(context));
+
+  fdrv->GetContext(context).EndPicture();
+
   return VA_STATUS_SUCCESS;
 }
 
 VAStatus FakeSyncSurface(VADriverContextP ctx, VASurfaceID render_target) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  CHECK(fdrv->SurfaceExists(render_target));
+
   return VA_STATUS_SUCCESS;
 }
 
 VAStatus FakeQuerySurfaceStatus(VADriverContextP ctx,
                                 VASurfaceID render_target,
                                 VASurfaceStatus* status) {
+  CHECK(false);
+
   return VA_STATUS_SUCCESS;
 }
 
@@ -388,13 +538,25 @@ VAStatus FakePutSurface(VADriverContextP ctx,
                         VARectangle* cliprects,
                         unsigned int number_cliprects,
                         unsigned int flags) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  CHECK(fdrv->SurfaceExists(surface));
+
   return VA_STATUS_SUCCESS;
 }
 
 VAStatus FakeQueryImageFormats(VADriverContextP ctx,
                                VAImageFormat* format_list,
                                int* num_formats) {
-  *num_formats = 0;
+  int i = 0;
+  for (auto format : kSupportedImageFormats) {
+    format_list[i] = format;
+    i++;
+  }
+
+  *num_formats = i;
+
   return VA_STATUS_SUCCESS;
 }
 
@@ -403,10 +565,18 @@ VAStatus FakeCreateImage(VADriverContextP ctx,
                          int width,
                          int height,
                          VAImage* image) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  fdrv->CreateImage(*format, width, height, image);
   return VA_STATUS_SUCCESS;
 }
 
 VAStatus FakeDestroyImage(VADriverContextP ctx, VAImageID image) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  fdrv->DestroyImage(image);
   return VA_STATUS_SUCCESS;
 }
 
@@ -423,6 +593,69 @@ VAStatus FakeGetImage(VADriverContextP ctx,
                       unsigned int width,
                       unsigned int height,
                       VAImageID image) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  CHECK(fdrv->SurfaceExists(surface));
+
+  const libvafake::FakeSurface& fake_surface = fdrv->GetSurface(surface);
+
+  CHECK(fdrv->ImageExists(image));
+
+  // TODO(b/316609501): Look into replacing this and making this function
+  // operate the same for both testing and non-testing environments.
+  if (!fake_surface.GetMappedBO().IsValid()) {
+    return VA_STATUS_SUCCESS;
+  }
+
+  // Chrome should only request images starting at (0, 0).
+  CHECK_EQ(x, 0);
+  CHECK_EQ(y, 0);
+  CHECK_LE(width, fake_surface.GetWidth());
+  CHECK_LE(height, fake_surface.GetHeight());
+
+  // Chrome should only ask the fake driver for images sourced from NV12
+  // surfaces.
+  CHECK_EQ(fake_surface.GetVAFourCC(), static_cast<uint32_t>(VA_FOURCC_NV12));
+
+  const libvafake::ScopedBOMapping::ScopedAccess mapped_bo =
+      fake_surface.GetMappedBO().BeginAccess();
+
+  const libvafake::FakeImage& fake_image = fdrv->GetImage(image);
+
+  // Chrome should only ask the fake driver to download NV12 surfaces onto NV12
+  // images.
+  CHECK_EQ(fake_image.GetFormat().fourcc,
+           static_cast<uint32_t>(VA_FOURCC_NV12));
+
+  // The image dimensions must be large enough to contain the surface.
+  CHECK_GE(static_cast<unsigned int>(fake_image.GetWidth()), width);
+  CHECK_GE(static_cast<unsigned int>(fake_image.GetHeight()), height);
+
+  uint8_t* const dst_y_addr =
+      static_cast<uint8_t*>(fake_image.GetBuffer().GetData()) +
+      fake_image.GetPlaneOffset(0);
+  const int dst_y_stride = static_cast<int>(fake_image.GetPlaneStride(0));
+
+  uint8_t* const dst_uv_addr =
+      static_cast<uint8_t*>(fake_image.GetBuffer().GetData()) +
+      fake_image.GetPlaneOffset(1);
+  const int dst_uv_stride = static_cast<int>(fake_image.GetPlaneStride(1));
+
+  const int copy_result = libyuv::NV12Copy(
+      /*src_y=*/mapped_bo.GetData(0),
+      /*src_stride_y=*/static_cast<int>(mapped_bo.GetStride(0)),
+      /*src_uv=*/mapped_bo.GetData(1),
+      /*src_stride_uv=*/static_cast<int>(mapped_bo.GetStride(1)),
+      /*dst_y=*/dst_y_addr,
+      /*dst_stride_y=*/dst_y_stride,
+      /*dst_uv=*/dst_uv_addr,
+      /*dst_stride_uv=*/dst_uv_stride,
+      /*width=*/width,
+      /*height=*/height);
+
+  CHECK_EQ(copy_result, 0);
+
   return VA_STATUS_SUCCESS;
 }
 
@@ -437,15 +670,24 @@ VAStatus FakePutImage(VADriverContextP ctx,
                       int dest_y,
                       unsigned int dest_width,
                       unsigned int dest_height) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  CHECK(fdrv->SurfaceExists(surface));
+
   return VA_STATUS_SUCCESS;
 }
 
 VAStatus FakeDeriveImage(VADriverContextP ctx,
                          VASurfaceID surface,
                          VAImage* image) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  CHECK(fdrv->SurfaceExists(surface));
+
   return VA_STATUS_SUCCESS;
 }
-
 
 VAStatus FakeQuerySubpictureFormats(VADriverContextP ctx,
                                     VAImageFormat* format_list,
@@ -499,6 +741,8 @@ VAStatus FakeAssociateSubpicture(VADriverContextP ctx,
                                  uint16_t dest_width,
                                  uint16_t dest_height,
                                  uint32_t flags) {
+  CHECK(false);
+
   return VA_STATUS_SUCCESS;
 }
 
@@ -506,6 +750,8 @@ VAStatus FakeDeassociateSubpicture(VADriverContextP ctx,
                                    VASubpictureID subpicture,
                                    VASurfaceID* target_surfaces,
                                    int num_surfaces) {
+  CHECK(false);
+
   return VA_STATUS_SUCCESS;
 }
 
@@ -531,6 +777,11 @@ VAStatus FakeQuerySurfaceAttributes(VADriverContextP ctx,
                                     VAConfigID config,
                                     VASurfaceAttrib* attribs,
                                     unsigned int* num_attribs) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  CHECK(fdrv->ConfigExists(config));
+
   // This function is called once with |attribs| NULL to dimension output. The
   // second time, |num_attribs| must be larger than kMaxNumSurfaceAttributes.
   // See the original documentation:
@@ -541,7 +792,7 @@ VAStatus FakeQuerySurfaceAttributes(VADriverContextP ctx,
   // num_attribs is adjusted to the number of elements that would be returned if
   // enough space was available."
   const unsigned int kMaxNumSurfaceAttributes = 32;
-  if (attribs == NULL) {
+  if (attribs == nullptr) {
     *num_attribs = kMaxNumSurfaceAttributes;
     return VA_STATUS_SUCCESS;
   }
@@ -597,10 +848,19 @@ VAStatus FakeCreateSurfaces2(VADriverContextP ctx,
                              unsigned int num_surfaces,
                              VASurfaceAttrib* attrib_list,
                              unsigned int num_attribs) {
+  libvafake::FakeDriver* fdrv =
+      static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  for (unsigned int i = 0; i < num_surfaces; i++) {
+    surfaces[i] = fdrv->CreateSurface(
+        format, width, height,
+        std::vector<VASurfaceAttrib>(attrib_list, attrib_list + num_attribs));
+  }
+
   return VA_STATUS_SUCCESS;
 }
 
-#define MAX_PROFILES 8
+#define MAX_PROFILES 9
 #define MAX_ENTRYPOINTS 8
 #define MAX_CONFIG_ATTRIBUTES 32
 #if MAX_CAPABILITY_ATTRIBUTES >= MAX_CONFIG_ATTRIBUTES
@@ -611,12 +871,16 @@ VAStatus FakeCreateSurfaces2(VADriverContextP ctx,
 
 #define DLL_EXPORT __attribute__((visibility("default")))
 
-VAStatus DLL_EXPORT __vaDriverInit_1_0(VADriverContextP ctx) {
+extern "C" VAStatus DLL_EXPORT __vaDriverInit_1_0(VADriverContextP ctx) {
   struct VADriverVTable* const vtable = ctx->vtable;
 
   ctx->version_major = VA_MAJOR_VERSION;
   ctx->version_minor = VA_MINOR_VERSION;
-  ctx->str_vendor = "fake";
+  ctx->str_vendor = "Chromium fake libva driver";
+  CHECK(ctx->drm_state);
+
+  ctx->pDriverData =
+      new libvafake::FakeDriver((static_cast<drm_state*>(ctx->drm_state))->fd);
 
   ctx->max_profiles = MAX_PROFILES;
   ctx->max_entrypoints = MAX_ENTRYPOINTS;
