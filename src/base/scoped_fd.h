@@ -25,7 +25,7 @@ class ScopedFD {
   int get() const;
 
  private:
-  int scoped_fd_;
+  int scoped_fd_ = -1;
 };
 
 }  // namespace base

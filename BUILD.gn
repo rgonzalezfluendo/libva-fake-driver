@@ -7,6 +7,10 @@ group("all") {
   deps = [ ":fake_drv_video" ]
 }
 
+pkg_config("dav1d") {
+  pkg_deps = [ "dav1d" ]
+}
+
 pkg_config("libdrm") {
   pkg_deps = [ "libdrm" ]
 }
@@ -17,6 +21,10 @@ pkg_config("libgbm") {
 
 pkg_config("libva") {
   pkg_deps = [ "libva" ]
+}
+
+pkg_config("libvpx") {
+  pkg_deps = [ "vpx" ]
 }
 
 pkg_config("libyuv") {
@@ -38,6 +46,8 @@ source_set("fake_libva_driver_internals") {
     "src/base/ptr_util.h",
     "src/base/scoped_fd.cc",
     "src/base/scoped_fd.h",
+    "src/av1_decoder_delegate.cc",
+    "src/av1_decoder_delegate.h",
     "src/context_delegate.h",
     "src/fake_buffer.cc",
     "src/fake_buffer.h",
@@ -56,6 +66,8 @@ source_set("fake_libva_driver_internals") {
     "src/object_tracker.h",
     "src/scoped_bo_mapping_factory.cc",
     "src/scoped_bo_mapping_factory.h",
+    "src/vpx_decoder_delegate.cc",
+    "src/vpx_decoder_delegate.h",
   ]
 
   public_configs = [
@@ -64,8 +76,10 @@ source_set("fake_libva_driver_internals") {
   ]
 
   configs += [
+    ":dav1d",
     ":libdrm",
     ":libyuv",
+    ":libvpx",
   ]
 
 }

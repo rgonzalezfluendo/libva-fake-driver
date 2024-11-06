@@ -5,9 +5,11 @@
 
 #include "fake_context.h"
 
+#include "av1_decoder_delegate.h"
 #include "base/logging.h"
 #include "fake_config.h"
 #include "no_op_context_delegate.h"
+#include "vpx_decoder_delegate.h"
 
 namespace {
 
@@ -24,6 +26,18 @@ std::unique_ptr<libvafake::ContextDelegate> CreateDelegate(
 
   if (config.GetEntrypoint() != VAEntrypointVLD) {
     return nullptr;
+  }
+
+  switch (config.GetProfile()) {
+    case VAProfileVP8Version0_3:
+    case VAProfileVP9Profile0:
+      return std::make_unique<libvafake::VpxDecoderDelegate>(
+          picture_width, picture_height, config.GetProfile());
+    case VAProfileAV1Profile0:
+      return std::make_unique<libvafake::Av1DecoderDelegate>(
+          config.GetProfile());
+    default:
+      break;
   }
 
   return nullptr;
