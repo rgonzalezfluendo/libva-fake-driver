@@ -6,7 +6,7 @@
 
 #include <unistd.h>
 
-namespace base {
+namespace libvafake::base {
 
 ScopedFD::ScopedFD(int fd) : scoped_fd_(fd) {}
 
@@ -38,4 +38,4 @@ int ScopedFD::get() const {
   return scoped_fd_;
 }
 
-}  // namespace base
+}  // namespace libvafake::base

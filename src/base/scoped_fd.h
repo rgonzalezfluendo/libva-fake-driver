@@ -5,7 +5,7 @@
 #ifndef BASE_SCOPED_FD_
 #define BASE_SCOPED_FD_
 
-namespace base {
+namespace libvafake::base {
 
 // ScopedFD is a RAII class that owns a file descriptor and, if it's valid, it
 // close()s it when one of the following happens:
@@ -28,6 +28,6 @@ class ScopedFD {
   int scoped_fd_ = -1;
 };
 
-}  // namespace base
+}  // namespace libvafake::base
 
 #endif  // BASE_SCOPED_FD_

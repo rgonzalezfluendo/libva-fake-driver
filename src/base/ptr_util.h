@@ -9,7 +9,7 @@
 #include <memory>
 #include <type_traits>
 
-namespace base {
+namespace libvafake::base {
 
 // Helper to transfer ownership of a raw pointer to a std::unique_ptr<T>.
 // Note that std::unique_ptr<T> has very different semantics from
@@ -20,6 +20,6 @@ std::unique_ptr<T> WrapUnique(T* ptr) {
   return std::unique_ptr<T>(ptr);
 }
 
-}  // namespace base
+}  // namespace libvafake::base
 
 #endif  // BASE_PTR_UTIL_H_
