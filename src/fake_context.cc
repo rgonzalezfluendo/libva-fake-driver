@@ -8,6 +8,7 @@
 #include "av1_decoder_delegate.h"
 #include "base/logging.h"
 #include "fake_config.h"
+#include "h264_decoder_delegate.h"
 #include "no_op_context_delegate.h"
 #include "vpx_decoder_delegate.h"
 
@@ -36,6 +37,10 @@ std::unique_ptr<libvafake::ContextDelegate> CreateDelegate(
     case VAProfileAV1Profile0:
       return std::make_unique<libvafake::Av1DecoderDelegate>(
           config.GetProfile());
+    case VAProfileH264ConstrainedBaseline:
+    case VAProfileH264Main:
+      return std::make_unique<libvafake::H264DecoderDelegate>(
+          picture_width, picture_height, config.GetProfile());
     default:
       break;
   }

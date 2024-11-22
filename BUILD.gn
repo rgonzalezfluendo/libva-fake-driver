@@ -31,6 +31,10 @@ pkg_config("libyuv") {
   pkg_deps = [ "libyuv" ]
 }
 
+pkg_config("openh264") {
+  pkg_deps = [ "openh264" ]
+}
+
 shared_library("fake_drv_video") {
   sources = [ "src/fake_drv_video.cc" ]
 
@@ -42,7 +46,9 @@ shared_library("fake_drv_video") {
 source_set("fake_libva_driver_internals") {
   visibility = [ ":fake_drv_video" ]
   sources = [
+    "src/base/byte_conversions.h",
     "src/base/logging.h",
+    "src/base/lru_cache.h",
     "src/base/ptr_util.h",
     "src/base/scoped_fd.cc",
     "src/base/scoped_fd.h",
@@ -61,6 +67,8 @@ source_set("fake_libva_driver_internals") {
     "src/fake_image.h",
     "src/fake_surface.cc",
     "src/fake_surface.h",
+    "src/h264_decoder_delegate.cc",
+    "src/h264_decoder_delegate.h",
     "src/no_op_context_delegate.cc",
     "src/no_op_context_delegate.h",
     "src/object_tracker.h",
@@ -80,6 +88,7 @@ source_set("fake_libva_driver_internals") {
     ":libdrm",
     ":libyuv",
     ":libvpx",
+    ":openh264",
   ]
 
 }
