@@ -36,7 +36,7 @@ pkg_config("openh264") {
 }
 
 shared_library("fake_drv_video") {
-  sources = [ "src/fake_drv_video.cc" ]
+  sources = [ "fake_drv_video.cc" ]
 
   deps = [
     ":fake_libva_driver_internals",
@@ -46,36 +46,36 @@ shared_library("fake_drv_video") {
 source_set("fake_libva_driver_internals") {
   visibility = [ ":fake_drv_video" ]
   sources = [
-    "src/base/byte_conversions.h",
-    "src/base/logging.h",
-    "src/base/lru_cache.h",
-    "src/base/ptr_util.h",
-    "src/base/scoped_fd.cc",
-    "src/base/scoped_fd.h",
-    "src/av1_decoder_delegate.cc",
-    "src/av1_decoder_delegate.h",
-    "src/context_delegate.h",
-    "src/fake_buffer.cc",
-    "src/fake_buffer.h",
-    "src/fake_config.cc",
-    "src/fake_config.h",
-    "src/fake_context.cc",
-    "src/fake_context.h",
-    "src/fake_driver.cc",
-    "src/fake_driver.h",
-    "src/fake_image.cc",
-    "src/fake_image.h",
-    "src/fake_surface.cc",
-    "src/fake_surface.h",
-    "src/h264_decoder_delegate.cc",
-    "src/h264_decoder_delegate.h",
-    "src/no_op_context_delegate.cc",
-    "src/no_op_context_delegate.h",
-    "src/object_tracker.h",
-    "src/scoped_bo_mapping_factory.cc",
-    "src/scoped_bo_mapping_factory.h",
-    "src/vpx_decoder_delegate.cc",
-    "src/vpx_decoder_delegate.h",
+    "base/byte_conversions.h",
+    "base/logging.h",
+    "base/lru_cache.h",
+    "base/ptr_util.h",
+    "base/scoped_fd.cc",
+    "base/scoped_fd.h",
+    "av1_decoder_delegate.cc",
+    "av1_decoder_delegate.h",
+    "context_delegate.h",
+    "fake_buffer.cc",
+    "fake_buffer.h",
+    "fake_config.cc",
+    "fake_config.h",
+    "fake_context.cc",
+    "fake_context.h",
+    "fake_driver.cc",
+    "fake_driver.h",
+    "fake_image.cc",
+    "fake_image.h",
+    "fake_surface.cc",
+    "fake_surface.h",
+    "h264_decoder_delegate.cc",
+    "h264_decoder_delegate.h",
+    "no_op_context_delegate.cc",
+    "no_op_context_delegate.h",
+    "object_tracker.h",
+    "scoped_bo_mapping_factory.cc",
+    "scoped_bo_mapping_factory.h",
+    "vpx_decoder_delegate.cc",
+    "vpx_decoder_delegate.h",
   ]
 
   public_configs = [

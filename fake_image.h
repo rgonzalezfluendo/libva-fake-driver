@@ -8,6 +8,7 @@
 
 #include <va/va.h>
 
+#include <memory>
 #include <vector>
 
 namespace libvafake {

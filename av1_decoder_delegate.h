@@ -8,6 +8,8 @@
 
 #include <va/va.h>
 
+#include <memory>
+
 #include "context_delegate.h"
 
 struct Dav1dContext;

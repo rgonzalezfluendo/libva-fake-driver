@@ -8,6 +8,7 @@
 
 #include <va/va.h>
 
+#include <memory>
 #include <vector>
 
 #include "scoped_bo_mapping_factory.h"
