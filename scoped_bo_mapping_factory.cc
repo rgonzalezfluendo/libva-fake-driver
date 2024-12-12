@@ -22,8 +22,11 @@ ScopedBOMapping::ScopedAccess::ScopedAccess(const ScopedBOMapping& mapping)
     struct dma_buf_sync sync_start;
     memset(&sync_start, 0, sizeof(sync_start));
     sync_start.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW;
-    CHECK(HANDLE_EINTR(ioctl(plane.prime_fd.get(), DMA_BUF_IOCTL_SYNC,
-                             &sync_start)) == 0);
+
+    // This will fail for the fake GBM backend, so ignore the return result. We
+    // leave the IOCTL in here anyway in case we're running on top of a real GEM
+    // driver.
+    HANDLE_EINTR(ioctl(plane.prime_fd.get(), DMA_BUF_IOCTL_SYNC, &sync_start));
   }
 }
 
@@ -32,8 +35,7 @@ ScopedBOMapping::ScopedAccess::~ScopedAccess() {
     struct dma_buf_sync sync_end;
     memset(&sync_end, 0, sizeof(sync_end));
     sync_end.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW;
-    CHECK(HANDLE_EINTR(
-              ioctl(plane.prime_fd.get(), DMA_BUF_IOCTL_SYNC, &sync_end)) == 0);
+    HANDLE_EINTR(ioctl(plane.prime_fd.get(), DMA_BUF_IOCTL_SYNC, &sync_end));
   }
 }
 
@@ -147,7 +149,6 @@ ScopedBOMappingFactory::~ScopedBOMappingFactory() = default;
 
 ScopedBOMapping ScopedBOMappingFactory::Create(
     gbm_import_fd_modifier_data import_data) {
-#if defined(MINIGBM)
   const std::lock_guard<std::mutex> lock(lock_);
   struct gbm_bo* bo_import =
       gbm_bo_import(gbm_device_.get(), GBM_BO_IMPORT_FD_MODIFIER, &import_data,
@@ -172,10 +173,6 @@ ScopedBOMapping ScopedBOMappingFactory::Create(
     planes.emplace_back(stride, addr, mmap_data, prime_fd);
   }
   return ScopedBOMapping(this, std::move(planes), bo_import);
-#else
-  NOTIMPLEMENTED();
-  return ScopedBOMapping();
-#endif
 }
 
 void ScopedBOMappingFactory::UnmapAndDestroyBufferObject(

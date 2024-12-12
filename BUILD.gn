@@ -3,8 +3,16 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+shared_library("fake_gbm") {
+  sources = [ "fake_gbm.cc" ]
+  configs += [ ":libgbm" ]
+}
+
 group("all") {
-  deps = [ ":fake_drv_video" ]
+  deps = [
+    ":fake_drv_video",
+    ":fake_gbm",
+  ]
 }
 
 pkg_config("dav1d") {
@@ -90,5 +98,4 @@ source_set("fake_libva_driver_internals") {
     ":libvpx",
     ":openh264",
   ]
-
 }
