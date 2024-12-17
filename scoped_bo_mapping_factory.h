@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <mutex>
+#include <vector>
 
 #include "base/logging.h"
 #include "base/scoped_fd.h"

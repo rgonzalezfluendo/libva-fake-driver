@@ -6,6 +6,8 @@
 #ifndef BASE_BYTE_CONVERSIONS_H_
 #define BASE_BYTE_CONVERSIONS_H_
 
+#include <bit>
+
 namespace libvafake::base {
 
 // The correct type to perform math operations on given values of type `T`. This

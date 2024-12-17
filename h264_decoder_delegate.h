@@ -10,7 +10,7 @@
 
 #include "base/lru_cache.h"
 #include "context_delegate.h"
-#include "openh264/wels/codec_api.h"
+#include "wels/codec_api.h"
 
 namespace libvafake {
 
