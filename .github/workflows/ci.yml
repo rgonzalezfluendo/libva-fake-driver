@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and test (Arch Linux)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install dependencies
+        run: |
+          # Refresh the keyring first: a stale archlinux image can otherwise
+          # fail to verify packages signed with keys it doesn't know yet.
+          pacman -Sy --noconfirm
+          pacman -S --noconfirm --needed archlinux-keyring
+          pacman -Syu --noconfirm --needed \
+            git ca-certificates \
+            meson ninja \
+            libva libva-utils libdrm mesa \
+            dav1d libvpx openh264 libyuv \
+            ffmpeg
+
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          meson setup builddir
+          ninja -C builddir
+
+      # GitHub-hosted runners have no /dev/dri. The fake driver only needs an
+      # openable file descriptor for the DRM display (fake_gbm.so's
+      # drmGetNodeTypeFromFd() reports it as a render node), and libva-utils'
+      # --device path skips the drmGetVersion() probe, so /dev/null works.
+      - name: Smoke test (vainfo)
+        env:
+          LIBVA_DRIVER_NAME: fake
+          LIBVA_DRIVERS_PATH: ${{ github.workspace }}/builddir
+          LD_PRELOAD: ${{ github.workspace }}/builddir/fake_gbm.so
+        run: vainfo -a --display drm --device /dev/null
+
+      - name: Decode test (FFmpeg + fake VA-API)
+        run: |
+          set -euo pipefail
+
+          # Self-contained baseline H.264 test vector: no B-frames, which keeps
+          # the decoder delegate's timestamp-to-surface mapping valid.
+          ffmpeg -hide_banner -loglevel error -nostdin -y \
+            -f lavfi -i testsrc=size=176x144:rate=25 -t 1 \
+            -c:v libx264 -profile:v baseline -pix_fmt yuv420p \
+            -f h264 /tmp/test.h264
+
+          export LIBVA_DRIVER_NAME=fake
+          export LIBVA_DRIVERS_PATH="$PWD/builddir"
+          export LD_PRELOAD="$PWD/builddir/fake_gbm.so"
+
+          # Decode with the software decoder and with the fake VA-API driver;
+          # their outputs must match.
+          sw_md5=$(ffmpeg -hide_banner -loglevel error -nostdin -threads 1 \
+            -i /tmp/test.h264 -fps_mode passthrough -f md5 - | sed 's/^MD5=//')
+          va_md5=$(ffmpeg -hide_banner -loglevel error -nostdin -threads 1 \
+            -hwaccel vaapi -hwaccel_device /dev/null -codec h264 \
+            -i /tmp/test.h264 -fps_mode passthrough \
+            -filter format=pix_fmts=yuv420p -f md5 - | sed 's/^MD5=//')
+
+          echo "software decoder md5: $sw_md5"
+          echo "fake VA-API md5:      $va_md5"
+          test -n "$sw_md5"
+          test "$sw_md5" = "$va_md5"
