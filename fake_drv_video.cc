@@ -26,9 +26,18 @@ VAStatus FakeTerminate(VADriverContextP ctx) {
 // Needed to be able to instantiate kCapabilities statically.
 #define MAX_CAPABILITY_ATTRIBUTES 5
 
-const VAImageFormat kSupportedImageFormats[] = {{.fourcc = VA_FOURCC_NV12,
-                                                 .byte_order = VA_LSB_FIRST,
-                                                 .bits_per_pixel = 12}};
+const VAImageFormat kSupportedImageFormats[] = {
+    {.fourcc = VA_FOURCC_NV12,
+     .byte_order = VA_LSB_FIRST,
+     .bits_per_pixel = 12},
+    // Clients that decode with the native (software) codecs and a VA-API
+    // hwaccel (e.g. FFmpeg's `-hwaccel vaapi`) use yuv420p as their frames
+    // context software format, which FFmpeg maps to I420. Advertise it so
+    // those clients can initialize and download decoded frames.
+    {.fourcc = VA_FOURCC_I420,
+     .byte_order = VA_LSB_FIRST,
+     .bits_per_pixel = 12},
+};
 
 struct Capability {
   VAProfile profile;
@@ -623,36 +632,73 @@ VAStatus FakeGetImage(VADriverContextP ctx,
 
   const libvafake::FakeImage& fake_image = fdrv->GetImage(image);
 
-  // Chrome should only ask the fake driver to download NV12 surfaces onto NV12
-  // images.
-  CHECK_EQ(fake_image.GetFormat().fourcc,
-           static_cast<uint32_t>(VA_FOURCC_NV12));
+  // The source surface is always NV12. The destination image may be NV12 (the
+  // Chrome case) or a planar YUV 420 format (the FFmpeg case).
+  const uint32_t image_fourcc = fake_image.GetFormat().fourcc;
+  CHECK(image_fourcc == static_cast<uint32_t>(VA_FOURCC_NV12) ||
+        image_fourcc == static_cast<uint32_t>(VA_FOURCC_I420) ||
+        image_fourcc == static_cast<uint32_t>(VA_FOURCC_YV12));
 
   // The image dimensions must be large enough to contain the surface.
   CHECK_GE(static_cast<unsigned int>(fake_image.GetWidth()), width);
   CHECK_GE(static_cast<unsigned int>(fake_image.GetHeight()), height);
 
-  uint8_t* const dst_y_addr =
-      static_cast<uint8_t*>(fake_image.GetBuffer().GetData()) +
-      fake_image.GetPlaneOffset(0);
+  uint8_t* const dst =
+      static_cast<uint8_t*>(fake_image.GetBuffer().GetData());
+  uint8_t* const dst_y_addr = dst + fake_image.GetPlaneOffset(0);
   const int dst_y_stride = static_cast<int>(fake_image.GetPlaneStride(0));
 
-  uint8_t* const dst_uv_addr =
-      static_cast<uint8_t*>(fake_image.GetBuffer().GetData()) +
-      fake_image.GetPlaneOffset(1);
-  const int dst_uv_stride = static_cast<int>(fake_image.GetPlaneStride(1));
+  const int src_stride_y = static_cast<int>(mapped_bo.GetStride(0));
+  const int src_stride_uv = static_cast<int>(mapped_bo.GetStride(1));
 
-  const int copy_result = libyuv::NV12Copy(
-      /*src_y=*/mapped_bo.GetData(0),
-      /*src_stride_y=*/static_cast<int>(mapped_bo.GetStride(0)),
-      /*src_uv=*/mapped_bo.GetData(1),
-      /*src_stride_uv=*/static_cast<int>(mapped_bo.GetStride(1)),
-      /*dst_y=*/dst_y_addr,
-      /*dst_stride_y=*/dst_y_stride,
-      /*dst_uv=*/dst_uv_addr,
-      /*dst_stride_uv=*/dst_uv_stride,
-      /*width=*/width,
-      /*height=*/height);
+  int copy_result;
+  if (image_fourcc == static_cast<uint32_t>(VA_FOURCC_NV12)) {
+    uint8_t* const dst_uv_addr = dst + fake_image.GetPlaneOffset(1);
+    const int dst_uv_stride = static_cast<int>(fake_image.GetPlaneStride(1));
+
+    copy_result = libyuv::NV12Copy(
+        /*src_y=*/mapped_bo.GetData(0),
+        /*src_stride_y=*/src_stride_y,
+        /*src_uv=*/mapped_bo.GetData(1),
+        /*src_stride_uv=*/src_stride_uv,
+        /*dst_y=*/dst_y_addr,
+        /*dst_stride_y=*/dst_y_stride,
+        /*dst_uv=*/dst_uv_addr,
+        /*dst_stride_uv=*/dst_uv_stride,
+        /*width=*/width,
+        /*height=*/height);
+  } else {
+    // I420 stores the U plane before V; YV12 stores V before U. libyuv also
+    // expects U before V, so point its dst_u/dst_v arguments at the right
+    // planes.
+    const size_t u_plane = image_fourcc == static_cast<uint32_t>(VA_FOURCC_I420)
+                               ? 1u
+                               : 2u;
+    const size_t v_plane = image_fourcc == static_cast<uint32_t>(VA_FOURCC_I420)
+                               ? 2u
+                               : 1u;
+
+    uint8_t* const dst_u_addr = dst + fake_image.GetPlaneOffset(u_plane);
+    const int dst_u_stride =
+        static_cast<int>(fake_image.GetPlaneStride(u_plane));
+    uint8_t* const dst_v_addr = dst + fake_image.GetPlaneOffset(v_plane);
+    const int dst_v_stride =
+        static_cast<int>(fake_image.GetPlaneStride(v_plane));
+
+    copy_result = libyuv::NV12ToI420(
+        /*src_y=*/mapped_bo.GetData(0),
+        /*src_stride_y=*/src_stride_y,
+        /*src_uv=*/mapped_bo.GetData(1),
+        /*src_stride_uv=*/src_stride_uv,
+        /*dst_y=*/dst_y_addr,
+        /*dst_stride_y=*/dst_y_stride,
+        /*dst_u=*/dst_u_addr,
+        /*dst_stride_u=*/dst_u_stride,
+        /*dst_v=*/dst_v_addr,
+        /*dst_stride_v=*/dst_v_stride,
+        /*width=*/width,
+        /*height=*/height);
+  }
 
   CHECK_EQ(copy_result, 0);
 
@@ -686,7 +732,12 @@ VAStatus FakeDeriveImage(VADriverContextP ctx,
 
   CHECK(fdrv->SurfaceExists(surface));
 
-  return VA_STATUS_SUCCESS;
+  // We don't support aliasing a surface's backing buffer as a VAImage, so
+  // report it as unimplemented. This makes clients fall back to
+  // vaCreateImage()+vaGetImage(), which we do support. Returning success
+  // without initializing |image| would be undefined behavior for clients that
+  // (like FFmpeg) inspect the returned image.
+  return VA_STATUS_ERROR_UNIMPLEMENTED;
 }
 
 VAStatus FakeQuerySubpictureFormats(VADriverContextP ctx,
@@ -783,7 +834,7 @@ VAStatus FakeQuerySurfaceAttributes(VADriverContextP ctx,
   CHECK(fdrv->ConfigExists(config));
 
   // This function is called once with |attribs| NULL to dimension output. The
-  // second time, |num_attribs| must be larger than kMaxNumSurfaceAttributes.
+  // second time, |num_attribs| must be larger than kNumSurfaceAttributes.
   // See the original documentation:
   // "The attrib_list array is allocated by the user and num_attribs shall be
   // initialized to the number of allocated elements in that array. Upon
@@ -791,24 +842,18 @@ VAStatus FakeQuerySurfaceAttributes(VADriverContextP ctx,
   // num_attribs. Otherwise, VA_STATUS_ERROR_MAX_NUM_EXCEEDED is returned and
   // num_attribs is adjusted to the number of elements that would be returned if
   // enough space was available."
-  const unsigned int kMaxNumSurfaceAttributes = 32;
+  //
+  // The contents of |attribs| on input are unspecified: the array is an output
+  // buffer and the driver must not read the value of the entries it receives
+  // (some clients, including FFmpeg, do not zero-initialize it).
+  const unsigned int kNumSurfaceAttributes = 4;
   if (attribs == nullptr) {
-    *num_attribs = kMaxNumSurfaceAttributes;
+    *num_attribs = kNumSurfaceAttributes;
     return VA_STATUS_SUCCESS;
   }
-  if (*num_attribs < kMaxNumSurfaceAttributes) {
-    *num_attribs = kMaxNumSurfaceAttributes;
+  if (*num_attribs < kNumSurfaceAttributes) {
+    *num_attribs = kNumSurfaceAttributes;
     return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
-  }
-
-  // |attribs| may have a single VASurfaceAttribPixelFormat set for querying
-  // support for a given pixel format. Chrome doesn't support it, so we verify
-  // all input types are zero (VASurfaceAttribNone).
-  for (size_t i = 0; i < kMaxNumSurfaceAttributes; ++i) {
-    if (attribs[i].type != VASurfaceAttribNone) {
-      *num_attribs = 0;
-      return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
-    }
   }
 
   int i = 0;
@@ -850,6 +895,26 @@ VAStatus FakeCreateSurfaces2(VADriverContextP ctx,
                              unsigned int num_attribs) {
   libvafake::FakeDriver* fdrv =
       static_cast<libvafake::FakeDriver*>(ctx->pDriverData);
+
+  // Some libva clients (e.g. FFmpeg) allocate surfaces backed by VA-allocated
+  // internal memory rather than by a DRM PRIME buffer. FakeSurface can't make
+  // use of the attributes such clients pass, so drop them; FakeSurface then
+  // allocates its own internal backing buffer for the surface.
+  bool has_external_buffer_descriptor = false;
+  bool has_drm_prime_memory_type = false;
+  for (unsigned int i = 0; i < num_attribs; i++) {
+    if (attrib_list[i].type == VASurfaceAttribExternalBufferDescriptor) {
+      has_external_buffer_descriptor = true;
+    } else if (attrib_list[i].type == VASurfaceAttribMemoryType) {
+      has_drm_prime_memory_type =
+          attrib_list[i].value.type == VAGenericValueTypeInteger &&
+          attrib_list[i].value.value.i ==
+              VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2;
+    }
+  }
+  if (!(has_external_buffer_descriptor && has_drm_prime_memory_type)) {
+    num_attribs = 0;
+  }
 
   for (unsigned int i = 0; i < num_surfaces; i++) {
     surfaces[i] = fdrv->CreateSurface(

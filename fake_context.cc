@@ -8,6 +8,7 @@
 #include "av1_decoder_delegate.h"
 #include "base/logging.h"
 #include "fake_config.h"
+#include "fake_surface.h"
 #include "h264_decoder_delegate.h"
 #include "no_op_context_delegate.h"
 #include "vpx_decoder_delegate.h"
@@ -17,7 +18,8 @@ namespace {
 std::unique_ptr<libvafake::ContextDelegate> CreateDelegate(
     const libvafake::FakeConfig& config,
     int picture_width,
-    int picture_height) {
+    int picture_height,
+    bool surface_backed) {
   const char* use_no_op_context_delegate_env_var =
       getenv("USE_NO_OP_CONTEXT_DELEGATE");
   if (use_no_op_context_delegate_env_var &&
@@ -27,6 +29,14 @@ std::unique_ptr<libvafake::ContextDelegate> CreateDelegate(
 
   if (config.GetEntrypoint() != VAEntrypointVLD) {
     return nullptr;
+  }
+
+  // The software decoder delegates write into the render target's mapped
+  // buffer object. Fall back to a no-op delegate for surfaces that aren't
+  // backed by one (e.g. a client that hands us VA-allocated memory that we
+  // couldn't back for some reason).
+  if (!surface_backed) {
+    return std::make_unique<libvafake::NoOpContextDelegate>();
   }
 
   switch (config.GetProfile()) {
@@ -63,8 +73,7 @@ FakeContext::FakeContext(FakeContext::IdType id,
       picture_width_(picture_width),
       picture_height_(picture_height),
       flag_(flag),
-      render_targets_(std::move(render_targets)),
-      delegate_(CreateDelegate(config_, picture_width_, picture_height_)) {}
+      render_targets_(std::move(render_targets)) {}
 FakeContext::~FakeContext() = default;
 
 FakeContext::IdType FakeContext::GetID() const {
@@ -92,6 +101,10 @@ const std::vector<VASurfaceID>& FakeContext::GetRenderTargets() const {
 }
 
 void FakeContext::BeginPicture(const FakeSurface& surface) const {
+  if (!delegate_) {
+    delegate_ = CreateDelegate(config_, picture_width_, picture_height_,
+                               surface.GetMappedBO().IsValid());
+  }
   CHECK(delegate_);
   delegate_->SetRenderTarget(surface);
 }

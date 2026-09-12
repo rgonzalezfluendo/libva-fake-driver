@@ -155,6 +155,26 @@ ScopedBOMapping ScopedBOMappingFactory::Create(
                     GBM_BO_USE_SW_READ_OFTEN | GBM_BO_USE_SW_WRITE_OFTEN);
   CHECK(bo_import);
 
+  return ImportAndMapLocked(bo_import);
+}
+
+ScopedBOMapping ScopedBOMappingFactory::Create(uint32_t width,
+                                               uint32_t height,
+                                               uint32_t gbm_format) {
+  const std::lock_guard<std::mutex> lock(lock_);
+
+  struct gbm_bo* bo =
+      gbm_bo_create(gbm_device_.get(), width, height, gbm_format,
+                    GBM_BO_USE_SW_READ_OFTEN | GBM_BO_USE_SW_WRITE_OFTEN);
+  CHECK(bo);
+
+  return ImportAndMapLocked(bo);
+}
+
+ScopedBOMapping ScopedBOMappingFactory::ImportAndMapLocked(
+    struct gbm_bo* bo_import) {
+  CHECK(bo_import);
+
   std::vector<ScopedBOMapping::Plane> planes;
   for (int plane = 0; plane < gbm_bo_get_plane_count(bo_import); plane++) {
     uint32_t stride;

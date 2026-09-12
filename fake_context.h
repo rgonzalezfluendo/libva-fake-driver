@@ -57,7 +57,12 @@ class FakeContext {
   const int picture_height_;
   const int flag_;
   const std::vector<VASurfaceID> render_targets_;
-  const std::unique_ptr<ContextDelegate> delegate_;
+
+  // Created lazily on the first BeginPicture() so that the delegate can be
+  // selected based on whether the render target surface is backed by a mapped
+  // buffer object (which the software decoder delegates require). Mutable
+  // because BeginPicture() is const.
+  mutable std::unique_ptr<ContextDelegate> delegate_;
 };
 
 }  // namespace libvafake

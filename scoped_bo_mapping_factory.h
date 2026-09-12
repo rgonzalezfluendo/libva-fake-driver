@@ -136,9 +136,19 @@ class ScopedBOMappingFactory {
   // crashes.
   ScopedBOMapping Create(gbm_import_fd_modifier_data import_data);
 
+  // Allocates a new buffer object of the given |gbm_format| and dimensions and
+  // maps it for CPU access. Unlike Create(), this does not require an external
+  // dma-buf, and is used to back VA-allocated surfaces. This method always
+  // returns a valid mapping.
+  ScopedBOMapping Create(uint32_t width, uint32_t height, uint32_t gbm_format);
+
  private:
   // Needed so that the ScopedBOMapping can call UnmapAndDestroyBufferObject().
   friend class ScopedBOMapping;
+
+  // Maps |bo_import| (taking ownership of it) and returns the resulting
+  // mapping. The factory lock must be held by the caller.
+  ScopedBOMapping ImportAndMapLocked(struct gbm_bo* bo_import);
 
   // Unmaps all the |planes| of the buffer object referenced by |bo_import|.
   void UnmapAndDestroyBufferObject(std::vector<ScopedBOMapping::Plane> planes,

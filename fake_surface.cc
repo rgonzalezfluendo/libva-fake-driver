@@ -45,11 +45,23 @@ std::unique_ptr<FakeSurface> FakeSurface::Create(
     unsigned int height,
     std::vector<VASurfaceAttrib> attrib_list,
     ScopedBOMappingFactory& scoped_bo_mapping_factory) {
-  // There are no specified attributes to this surface
+  // There are no specified attributes to this surface. This happens for
+  // clients (e.g. FFmpeg) that allocate surfaces backed by VA-allocated memory
+  // instead of by an external DRM PRIME buffer. Back such surfaces with an
+  // internally-allocated buffer object so that the software decoder delegates
+  // can write decoded frames into them.
   if (attrib_list.empty()) {
-    return base::WrapUnique(new FakeSurface(id, format, /*va_fourcc=*/0u, width,
+    const bool is_10bpp = format == VA_RT_FORMAT_YUV420_10BPP;
+    const uint32_t gbm_format =
+        is_10bpp ? GBM_FORMAT_P010 : GBM_FORMAT_NV12;
+    const uint32_t va_fourcc = is_10bpp ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+
+    ScopedBOMapping mapped_bo =
+        scoped_bo_mapping_factory.Create(width, height, gbm_format);
+    CHECK(!!mapped_bo);
+    return base::WrapUnique(new FakeSurface(id, format, va_fourcc, width,
                                             height, std::move(attrib_list),
-                                            /*mapped_bo=*/{}));
+                                            std::move(mapped_bo)));
   }
 
   // Verify attributes and extract surface descriptor.
