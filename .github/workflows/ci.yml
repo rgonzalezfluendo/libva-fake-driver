@@ -25,7 +25,8 @@ jobs:
             meson ninja \
             libva libva-utils libdrm mesa \
             dav1d libvpx openh264 libyuv \
-            ffmpeg
+            ffmpeg \
+            python setuptools-scm
 
       - name: Check out
         uses: actions/checkout@v4
@@ -74,3 +75,44 @@ jobs:
           echo "fake VA-API md5:      $va_md5"
           test -n "$sw_md5"
           test "$sw_md5" = "$va_md5"
+
+      # fluster is an AUR package, and makepkg refuses to run as root, so build
+      # it as an unprivileged user.
+      - name: Install fluster (AUR)
+        run: |
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          git clone https://aur.archlinux.org/fluster.git /tmp/fluster-aur
+          chown -R builder:builder /tmp/fluster-aur
+          su builder -c 'cd /tmp/fluster-aur && makepkg -si --noconfirm'
+
+      # Fluster's FFmpeg VAAPI decoder runs `ffmpeg -hwaccel vaapi` without a
+      # device, and FFmpeg then probes /dev/dri (absent in CI). Shim ffmpeg to
+      # inject the dummy device FFmpeg's default path can't find.
+      - name: Install VA-API ffmpeg shim
+        run: |
+          cat > /usr/local/bin/ffmpeg <<'EOF'
+          #!/bin/bash
+          args=()
+          while [ "$#" -gt 0 ]; do
+            if [ "$1" = "-hwaccel" ] && [ "${2:-}" = "vaapi" ]; then
+              args+=("-hwaccel" "vaapi" "-hwaccel_device" "/dev/null")
+              shift 2
+              continue
+            fi
+            args+=("$1")
+            shift
+          done
+          exec /usr/bin/ffmpeg "${args[@]}"
+          EOF
+          chmod +x /usr/local/bin/ffmpeg
+
+      - name: Download fluster test vectors
+        run: fluster download JVT-AVC_V1
+
+      - name: Fluster conformance (FFmpeg-H.264-VAAPI)
+        env:
+          LIBVA_DRIVER_NAME: fake
+          LIBVA_DRIVERS_PATH: ${{ github.workspace }}/builddir
+          LD_PRELOAD: ${{ github.workspace }}/builddir/fake_gbm.so
+        run: fluster run -d FFmpeg-H.264-VAAPI -ts JVT-AVC_V1 -j 1 -tv FM1_FT_E -v
